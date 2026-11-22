@@ -1,8 +1,8 @@
 // A tiny static server for game/ (Node 22, standard library only), so the game
-// can be played locally without a build step: `node serve.ts` serves game/ on
+// can be played locally with no build step: `node serve.ts` serves game/ on
 // http://localhost:8080. It sends the MIME types a browser game needs, refuses
-// any path outside game/, and otherwise does nothing clever: this is a
-// development convenience, not a web server for the internet.
+// any path that escapes game/, and otherwise does nothing clever — a dev
+// convenience, not a web server for the internet.
 import { createReadStream, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join, normalize, resolve, sep } from 'node:path';
@@ -14,7 +14,7 @@ const portIndex = args.indexOf('--port');
 const requested = portIndex === -1 ? 8080 : Number(args[portIndex + 1]);
 const port = Number.isInteger(requested) && requested > 0 && requested < 65536 ? requested : 8080;
 
-const MIME = {
+const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.mjs': 'text/javascript; charset=utf-8',
@@ -33,7 +33,8 @@ createServer((request, response) => {
   const url = new URL(request.url ?? '/', 'http://localhost');
   let path = decodeURIComponent(url.pathname);
   if (path === '/') path = '/index.html';
-  const resolved = resolve(join(root, normalize(path).replace(/^(\.\.(\/|\\|$))+/, '')));
+  const cleaned = normalize(path).replace(/^(\.\.(\/|\\|$))+/, '');
+  const resolved = resolve(join(root, cleaned));
   if (!resolved.startsWith(root + sep) && resolved !== root) {
     response.writeHead(403);
     response.end('forbidden');
@@ -53,7 +54,7 @@ createServer((request, response) => {
     return;
   }
   response.writeHead(200, {
-    'content-type': MIME[extname(resolved)] ?? 'application/octet-stream',
+    'content-type': MIME_TYPES[extname(resolved)] ?? 'application/octet-stream',
     'cache-control': 'no-store', // dev server: always serve the latest edit
   });
   createReadStream(resolved).pipe(response);

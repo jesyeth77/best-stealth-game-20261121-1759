@@ -1,7 +1,7 @@
 // NIGHTSHIFT — boot, screen flow and the frame loop.
 // Screens: title -> briefing -> play -> (paused | caught | clear) -> over.
-// The game exposes window.__game for the shot driver and live play-tests:
-// window.__shotReady flips true when a ?shot= scene has settled.
+// The session object is exposed as window.__game for the shot driver and live
+// play-tests; window.__shotReady flips true when a ?shot= scene has settled.
 import { CONFIG } from './config.js';
 import { createWorld, updateWorld, throwCoin, anyChase } from './world.js';
 import { levelCount } from './levels.js';
@@ -17,19 +17,19 @@ canvas.width = CONFIG.canvasWidth;
 canvas.height = CONFIG.canvasHeight;
 canvas.tabIndex = 0;
 
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seed = Number(params.get('seed') || '1') || 1;
+const query = new URLSearchParams(window.location.search);
+const shotName = query.get('shot');
+const seed = Number(query.get('seed') || '1') || 1;
 
 const input = createInput(canvas);
 const audio = createAudio();
 
 // Hiding the tab mid-shift pauses the game so you don't get caught while away.
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden && game.screen === 'play') game.screen = 'paused';
+  if (document.hidden && session.screen === 'play') session.screen = 'paused';
 });
 
-const game = {
+const session = {
   screen: 'title',
   world: createWorld(0, makeRng((seed * 2654435761) >>> 0)),
   time: 0,
@@ -38,138 +38,144 @@ const game = {
   totalChips: 0,
   ghostLevels: 0,
   lives: CONFIG.lives,
-  shot: shot || null,
+  shot: shotName || null,
   shotScript: null,
   shotReady: false,
   muted: false,
   stepTimer: 0,
   wasChasing: false,
 };
-window.__game = game;
-Object.defineProperty(window, '__shotReady', { get: () => game.shotReady });
+window.__game = session;
+Object.defineProperty(window, '__shotReady', { get: () => session.shotReady });
 
-if (shot) applyShot(game, shot, seed);
+if (shotName) applyShot(session, shotName, seed);
 
-function startLevel(index) {
-  game.world = createWorld(index, makeRng((Date.now() % 2147483647) >>> 0));
-  game.world.lives = game.lives; // lives carry across retries of a floor
-  game.screen = 'briefing';
-  game.shotReady = false;
+function openLevel(index) {
+  session.world = createWorld(index, makeRng((Date.now() % 2147483647) >>> 0));
+  session.world.lives = session.lives; // lives carry across retries of a floor
+  session.screen = 'briefing';
+  session.shotReady = false;
 }
 
-function startRun() {
-  game.totalScore = 0;
-  game.floorsCleared = 0;
-  game.totalChips = 0;
-  game.ghostLevels = 0;
-  game.lives = CONFIG.lives;
-  startLevel(0);
+function beginRun() {
+  session.totalScore = 0;
+  session.floorsCleared = 0;
+  session.totalChips = 0;
+  session.ghostLevels = 0;
+  session.lives = CONFIG.lives;
+  openLevel(0);
 }
 
-function confirmPressed(pressed) {
+function isConfirm(pressed) {
   return pressed.has('confirm');
+}
+
+// One frame of live play on the 'play' screen: coin throws, the world step,
+// footstep ticks, the chase sting, and the caught / cleared transitions.
+function playFrame(dt, pressed) {
+  if (pressed.has('pause')) {
+    session.screen = 'paused';
+    return;
+  }
+  const click = input.takeClick();
+  if (click && click.x < CONFIG.panelX) {
+    if (throwCoin(session.world, click.x, click.y)) audio.coin();
+  }
+  if (pressed.has('coin')) {
+    const player = session.world.player;
+    const tx = player.x + Math.cos(player.facing) * 200;
+    const ty = player.y + Math.sin(player.facing) * 200;
+    if (throwCoin(session.world, tx, ty)) audio.coin();
+  }
+  updateWorld(session.world, input.snapshot(), dt);
+  // Footstep ticks, quieter while sneaking.
+  if (session.world.player.moving) {
+    session.stepTimer -= dt;
+    if (session.stepTimer <= 0) {
+      audio.step(session.world.player.sneaking);
+      session.stepTimer = session.world.player.sneaking ? 0.42 : 0.3;
+    }
+  }
+  // One-shot sting on the moment a chase begins.
+  const chasing = anyChase(session.world);
+  if (chasing && !session.wasChasing) audio.alert();
+  session.wasChasing = chasing;
+  if (session.world.caught) {
+    audio.caught();
+    session.lives = session.world.lives;
+    session.screen = 'caught';
+  } else if (session.world.levelDone) {
+    audio.levelClear();
+    session.totalScore += session.world.score;
+    session.floorsCleared += 1;
+    session.totalChips += session.world.chipsGot;
+    if (session.world.clearStats && session.world.clearStats.ghost) session.ghostLevels += 1;
+    session.screen = 'clear';
+  }
 }
 
 function frame(now) {
   requestAnimationFrame(frame);
-  const dt = Math.min(0.05, (now - game.lastNow) / 1000 || 0.016);
-  game.lastNow = now;
-  game.time += dt;
+  const dt = Math.min(0.05, (now - session.lastNow) / 1000 || 0.016);
+  session.lastNow = now;
+  session.time += dt;
   const pressed = input.takePressed();
 
   if (pressed.has('mute')) {
-    game.muted = audio.toggleMute();
+    session.muted = audio.toggleMute();
   }
-  if (pressed.has('restart') && (game.screen === 'play' || game.screen === 'paused')) {
-    startLevel(game.world.levelIndex);
+  if (pressed.has('restart') && (session.screen === 'play' || session.screen === 'paused')) {
+    openLevel(session.world.levelIndex);
   }
 
-  if (game.shot) {
-    if (!game.shotReady) updateShot(game, dt);
-    render(ctx, game);
+  // Screenshot scenes run their own script and skip the menu flow entirely.
+  if (session.shot) {
+    if (!session.shotReady) updateShot(session, dt);
+    render(ctx, session);
     return;
   }
 
-  if (game.screen === 'title') {
-    if (confirmPressed(pressed) || input.takeClick()) {
-      audio.unlock();
-      audio.startDrone();
-      startRun();
-    }
-  } else if (game.screen === 'briefing') {
-    if (confirmPressed(pressed) || input.takeClick()) {
-      audio.unlock();
-      game.screen = 'play';
-    }
-  } else if (game.screen === 'play') {
-    if (pressed.has('pause')) {
-      game.screen = 'paused';
-    } else {
-      const click = input.takeClick();
-      if (click && click.x < CONFIG.panelX) {
-        if (throwCoin(game.world, click.x, click.y)) audio.coin();
+  switch (session.screen) {
+    case 'title':
+      if (isConfirm(pressed) || input.takeClick()) {
+        audio.unlock();
+        audio.startDrone();
+        beginRun();
       }
-      if (pressed.has('coin')) {
-        const player = game.world.player;
-        const tx = player.x + Math.cos(player.facing) * 200;
-        const ty = player.y + Math.sin(player.facing) * 200;
-        if (throwCoin(game.world, tx, ty)) audio.coin();
+      break;
+    case 'briefing':
+      if (isConfirm(pressed) || input.takeClick()) {
+        audio.unlock();
+        session.screen = 'play';
       }
-      const snapshot = input.snapshot();
-      updateWorld(game.world, snapshot, dt);
-      // Footstep ticks, quieter while sneaking.
-      if (game.world.player.moving) {
-        game.stepTimer -= dt;
-        if (game.stepTimer <= 0) {
-          audio.step(game.world.player.sneaking);
-          game.stepTimer = game.world.player.sneaking ? 0.42 : 0.3;
-        }
+      break;
+    case 'play':
+      playFrame(dt, pressed);
+      break;
+    case 'paused':
+      if (pressed.has('pause') || isConfirm(pressed) || input.takeClick()) {
+        session.screen = 'play';
       }
-      // One-shot stings on state changes.
-      const chasing = anyChase(game.world);
-      if (chasing && !game.wasChasing) audio.alert();
-      game.wasChasing = chasing;
-      if (game.world.caught) {
-        audio.caught();
-        game.lives = game.world.lives;
-        game.screen = 'caught';
-      } else if (game.world.levelDone) {
-        audio.levelClear();
-        game.totalScore += game.world.score;
-        game.floorsCleared += 1;
-        game.totalChips += game.world.chipsGot;
-        if (game.world.clearStats && game.world.clearStats.ghost) game.ghostLevels += 1;
-        game.screen = 'clear';
+      break;
+    case 'caught':
+      if (isConfirm(pressed) || input.takeClick()) {
+        if (session.lives > 0) openLevel(session.world.levelIndex);
+        else session.screen = 'over';
       }
-    }
-  } else if (game.screen === 'paused') {
-    if (pressed.has('pause') || confirmPressed(pressed) || input.takeClick()) {
-      game.screen = 'play';
-    }
-  } else if (game.screen === 'caught') {
-    if (confirmPressed(pressed) || input.takeClick()) {
-      if (game.lives > 0) {
-        startLevel(game.world.levelIndex);
-      } else {
-        game.screen = 'over';
+      break;
+    case 'clear':
+      if (isConfirm(pressed) || input.takeClick()) {
+        if (session.world.levelIndex + 1 < levelCount()) openLevel(session.world.levelIndex + 1);
+        else session.screen = 'over';
       }
-    }
-  } else if (game.screen === 'clear') {
-    if (confirmPressed(pressed) || input.takeClick()) {
-      if (game.world.levelIndex + 1 < levelCount()) {
-        startLevel(game.world.levelIndex + 1);
-      } else {
-        game.screen = 'over';
-      }
-    }
-  } else if (game.screen === 'over') {
-    if (confirmPressed(pressed) || input.takeClick()) {
-      startRun();
-    }
+      break;
+    case 'over':
+      if (isConfirm(pressed) || input.takeClick()) beginRun();
+      break;
   }
 
-  render(ctx, game);
+  render(ctx, session);
 }
 
-game.lastNow = performance.now();
+session.lastNow = performance.now();
 requestAnimationFrame(frame);

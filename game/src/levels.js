@@ -3,7 +3,7 @@
 // 'C' crate (cover: blocks movement and a guard's line of sight), 'P' player start,
 // 'E' vault exit, 'D' data chip, 'K' keycard, 'G' guard spawn.
 // Guard waypoints are tile coordinates; the world converts them to pixels.
-// parse() validates every row is exactly 26 tiles, so a typo fails loudly.
+// parseLevel() validates every row is exactly 26 tiles, so a typo fails loudly.
 import { CONFIG } from './config.js';
 
 const LEVELS = [
@@ -108,11 +108,12 @@ export function levelCount() {
 
 export function levelMeta(index) {
   const level = LEVELS[index];
-  return { name: level.name, sub: level.sub, briefing: level.briefing, lockedExit: level.lockedExit, par: level.par };
+  const { name, sub, briefing, lockedExit, par } = level;
+  return { name, sub, briefing, lockedExit, par };
 }
 
-// Parse a level map into the pieces the world and renderer need. Throws on any
-// malformed row so a bad map can never silently ship as a broken floor.
+// Parse a level map into the pieces the world and renderer need. Any malformed
+// row throws, so a bad map can never silently ship as a broken floor.
 export function parseLevel(index) {
   const level = LEVELS[index];
   const rows = level.map;
@@ -123,31 +124,30 @@ export function parseLevel(index) {
   const crates = new Set();
   const shadow = new Set();
   const chips = [];
+  const guardSpawns = [];
   let playerStart = null;
   let exit = null;
   let keycard = null;
-  const guardSpawns = [];
-  for (let y = 0; y < rows.length; y += 1) {
-    const row = rows[y];
+  rows.forEach((row, y) => {
     if (row.length !== CONFIG.cols) {
       throw new Error(`level ${index} row ${y}: ${row.length} cols, expected ${CONFIG.cols}: "${row}"`);
     }
-    for (let x = 0; x < row.length; x += 1) {
+    [...row].forEach((ch, x) => {
       const key = `${x},${y}`;
-      const ch = row[x];
-      if (ch === '#') walls.add(key);
-      else if (ch === 'C') crates.add(key);
-      else if (ch === ',') shadow.add(key);
-      else if (ch === 'D') chips.push({ x, y, taken: false });
-      else if (ch === 'P') playerStart = { x, y };
-      else if (ch === 'E') exit = { x, y };
-      else if (ch === 'K') keycard = { x, y, taken: false };
-      else if (ch === 'G') guardSpawns.push({ x, y });
-      else if (ch !== '.' && ch !== ' ') {
-        throw new Error(`level ${index}: unknown tile "${ch}" at ${x},${y}`);
+      switch (ch) {
+        case '#': walls.add(key); break;
+        case 'C': crates.add(key); break;
+        case ',': shadow.add(key); break;
+        case 'D': chips.push({ x, y, taken: false }); break;
+        case 'P': playerStart = { x, y }; break;
+        case 'E': exit = { x, y }; break;
+        case 'K': keycard = { x, y, taken: false }; break;
+        case 'G': guardSpawns.push({ x, y }); break;
+        case '.': case ' ': break;
+        default: throw new Error(`level ${index}: unknown tile "${ch}" at ${x},${y}`);
       }
-    }
-  }
+    });
+  });
   if (!playerStart) throw new Error(`level ${index}: no player start`);
   if (!exit) throw new Error(`level ${index}: no exit`);
   if (level.lockedExit && !keycard) {
@@ -181,7 +181,8 @@ export function tileCenter(x, y) {
 // Is this tile solid for movement (wall or crate)?
 export function isSolidTile(parsed, x, y) {
   if (x < 0 || y < 0 || x >= CONFIG.cols || y >= CONFIG.rows) return true;
-  return parsed.walls.has(`${x},${y}`) || parsed.crates.has(`${x},${y}`);
+  const key = `${x},${y}`;
+  return parsed.walls.has(key) || parsed.crates.has(key);
 }
 
 // Does this tile block a guard's sight? Walls and crates both do.

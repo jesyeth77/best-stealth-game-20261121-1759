@@ -8,6 +8,7 @@ import { clamp, dist, angleTo, angleDelta } from './random.js';
 
 export const GUARD_STATE = { PATROL: 'patrol', INVESTIGATE: 'investigate', CHASE: 'chase' };
 
+// Which tile holds a playfield pixel.
 export function tileAtPixel(parsed, px, py) {
   return {
     x: Math.floor((px - CONFIG.fieldX) / CONFIG.tile),
@@ -15,12 +16,13 @@ export function tileAtPixel(parsed, px, py) {
   };
 }
 
+// Is this point standing on a dark (shadow) tile?
 export function inShadow(parsed, px, py) {
   const t = tileAtPixel(parsed, px, py);
   return parsed.shadow.has(`${t.x},${t.y}`);
 }
 
-// Line of sight between two points: stepped in 8 px hops; any sight-blocking
+// Line of sight between two points, stepped in 8 px hops. Any sight-blocking
 // tile (wall or crate) on the way breaks it.
 export function hasLineOfSight(parsed, ax, ay, bx, by) {
   const steps = Math.max(1, Math.ceil(dist(ax, ay, bx, by) / 8));
@@ -31,7 +33,7 @@ export function hasLineOfSight(parsed, ax, ay, bx, by) {
   return true;
 }
 
-// Does this guard see the player right now? Range, cone angle and LOS all must
+// Does this guard see the player right now? Range, cone angle and LOS must all
 // agree. Returns a 0..1 visibility factor (1 = dead centre, close, lit).
 export function guardSeesPlayer(parsed, guard, player) {
   const d = dist(guard.x, guard.y, player.x, player.y);
@@ -45,6 +47,7 @@ export function guardSeesPlayer(parsed, guard, player) {
   return clamp(0.35 + 0.65 * centre * (0.5 + 0.5 * closeness), 0, 1);
 }
 
+// Build a fresh floor: parse the map, place the player, spawn the guards.
 export function createWorld(levelIndex, rng) {
   const parsed = parseLevel(levelIndex);
   const start = tileCenter(parsed.playerStart.x, parsed.playerStart.y);
@@ -99,25 +102,26 @@ export function createWorld(levelIndex, rng) {
     chipsGot: 0,
     lives: CONFIG.lives,
     time: 0,
-    everAlarmed: false, // any guard hit 100 this level (kills the ghost bonus)
+    everAlarmed: false, // a guard hit 100 this floor (kills the ghost bonus)
     levelDone: false,
     caught: false,
     message: '',
     messageLeft: 0,
-    noisePulse: null, // {x, y, radius, left} — expanding footstep/noise ring
+    noisePulse: null, // {x, y, radius, left}: expanding ring where a coin landed
   };
 }
 
-// Move a circle against solid tiles, axis by axis so it slides along walls.
-function moveCircle(parsed, body, dx, dy) {
+// Slide a circular body against solid tiles, axis by axis, so it slides along
+// walls instead of sticking on corners.
+function slideBody(parsed, body, dx, dy) {
   const r = body.radius;
   const nx = body.x + dx;
-  if (!hitsSolid(parsed, nx, body.y, r)) body.x = nx;
-  if (!hitsSolid(parsed, body.x, body.y + dy, r)) body.y += dy;
+  if (!bodyHitsSolid(parsed, nx, body.y, r)) body.x = nx;
+  if (!bodyHitsSolid(parsed, body.x, body.y + dy, r)) body.y += dy;
 }
 
-function hitsSolid(parsed, px, py, r) {
-  // Check the four corners of the body's bounding box, in tile space.
+function bodyHitsSolid(parsed, px, py, r) {
+  // The four corners of the body's bounding box, in tile space.
   const corners = [
     [px - r, py - r],
     [px + r, py - r],
@@ -140,14 +144,14 @@ export function updateWorld(world, input, dt) {
     if (world.noisePulse.left <= 0) world.noisePulse = null;
   }
 
-  updatePlayer(world, input, dt);
-  updateCoinFlight(world, dt);
-  updateGuards(world, dt);
-  updatePickups(world);
-  updateExit(world);
+  stepPlayer(world, input, dt);
+  stepCoin(world, dt);
+  stepGuards(world, dt);
+  collectPickups(world);
+  checkExit(world);
 }
 
-function updatePlayer(world, input, dt) {
+function stepPlayer(world, input, dt) {
   const player = world.player;
   const speed = input.sneak ? CONFIG.player.sneakSpeed : CONFIG.player.walkSpeed;
   let mx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
@@ -155,107 +159,83 @@ function updatePlayer(world, input, dt) {
   const len = Math.hypot(mx, my);
   player.moving = len > 0;
   player.sneaking = !!input.sneak;
-  if (len > 0) {
-    mx /= len;
-    my /= len;
-    player.facing = Math.atan2(my, mx);
-    player.stepPhase += dt * (input.sneak ? 7 : 11);
-    moveCircle(world.parsed, player, mx * speed * dt, my * speed * dt);
-    // Walking is loud: guards nearby turn toward the noise.
-    const noiseRadius = input.sneak ? CONFIG.player.noiseSneak : CONFIG.player.noiseWalk;
-    if (noiseRadius > 40) {
-      for (const guard of world.guards) {
-        if (guard.state === GUARD_STATE.PATROL) {
-          const d = dist(guard.x, guard.y, player.x, player.y);
-          if (d < noiseRadius && guard.alert < 55) {
-            guard.alert = Math.min(guard.alert + dt * 14, 55);
-            guard.investigateX = player.x;
-            guard.investigateY = player.y;
-            guard.state = GUARD_STATE.INVESTIGATE;
-            guard.suspicionLeft = 5;
-          }
-        }
-      }
-    }
+  if (len <= 0) return;
+  mx /= len;
+  my /= len;
+  player.facing = Math.atan2(my, mx);
+  player.stepPhase += dt * (input.sneak ? 7 : 11);
+  slideBody(world.parsed, player, mx * speed * dt, my * speed * dt);
+  // Walking is loud: a patrolling guard nearby turns toward the noise.
+  const noiseRadius = input.sneak ? CONFIG.player.noiseSneak : CONFIG.player.noiseWalk;
+  if (noiseRadius <= 40) return; // sneaking is quiet enough to stay unheard
+  for (const guard of world.guards) {
+    if (guard.state !== GUARD_STATE.PATROL) continue;
+    const d = dist(guard.x, guard.y, player.x, player.y);
+    if (d >= noiseRadius || guard.alert >= 55) continue;
+    guard.alert = Math.min(guard.alert + dt * 14, 55);
+    guard.investigateX = player.x;
+    guard.investigateY = player.y;
+    guard.state = GUARD_STATE.INVESTIGATE;
+    guard.suspicionLeft = 5;
   }
 }
 
-function updateCoinFlight(world, dt) {
+function stepCoin(world, dt) {
   const flight = world.coinFlight;
   if (!flight) return;
   flight.t += dt / 0.45;
-  if (flight.t >= 1) {
-    world.coinFlight = null;
-    world.noisePulse = { x: flight.tx, y: flight.ty, radius: CONFIG.coin.noiseRadius, left: 0.9 };
-    for (const guard of world.guards) {
-      if (guard.state !== GUARD_STATE.CHASE) {
-        const d = dist(guard.x, guard.y, flight.tx, flight.ty);
-        if (d < CONFIG.coin.noiseRadius) {
-          guard.state = GUARD_STATE.INVESTIGATE;
-          guard.investigateX = flight.tx;
-          guard.investigateY = flight.ty;
-          guard.suspicionLeft = 6;
-        }
-      }
-    }
-  }
-}
-
-// Click (or C key) throws a coin toward the pointer: guards in earshot walk
-// over to check the clink. Limited coins per level.
-export function throwCoin(world, tx, ty) {
-  if (world.coins <= 0 || world.coinFlight || world.levelDone || world.caught) return false;
-  const d = dist(world.player.x, world.player.y, tx, ty);
-  if (d > CONFIG.coin.throwRange) {
-    const k = CONFIG.coin.throwRange / d;
-    tx = world.player.x + (tx - world.player.x) * k;
-    ty = world.player.y + (ty - world.player.y) * k;
-  }
-  world.coins -= 1;
-  world.coinFlight = { fx: world.player.x, fy: world.player.y, tx, ty, t: 0 };
-  return true;
-}
-
-function moveGuardToward(world, guard, tx, ty, speed, dt) {
-  const d = dist(guard.x, guard.y, tx, ty);
-  if (d < 2) return { reached: true, moved: false };
-  const step = Math.min(d, speed * dt);
-  const nx = guard.x + ((tx - guard.x) / d) * step;
-  const ny = guard.y + ((ty - guard.y) / d) * step;
-  const before = { x: guard.x, y: guard.y };
-  moveCircle(world.parsed, guard, nx - guard.x, ny - guard.y);
-  // Turn toward the walk direction smoothly instead of snapping: a guard
-  // sweeping its cone around is readable, and it gives the player a moment.
-  const want = angleTo(guard.x, guard.y, tx, ty);
-  const turn = clamp(angleDelta(guard.angle, want), -5 * dt, 5 * dt);
-  guard.angle += turn;
-  guard.stepPhase += dt * 9;
-  const moved = dist(before.x, before.y, guard.x, guard.y) > 0.5;
-  return { reached: dist(guard.x, guard.y, tx, ty) < 8, moved };
-}
-
-function updateGuards(world, dt) {
-  const player = world.player;
+  if (flight.t < 1) return;
+  world.coinFlight = null;
+  world.noisePulse = { x: flight.tx, y: flight.ty, radius: CONFIG.coin.noiseRadius, left: 0.9 };
   for (const guard of world.guards) {
-    const visibility = guardSeesPlayer(world.parsed, guard, player);
-    const shadowed = inShadow(world.parsed, player.x, player.y);
-    if (visibility > 0) {
-      let rate = shadowed ? CONFIG.guard.detectShadow : CONFIG.guard.detectLit;
-      if (player.sneaking) rate *= CONFIG.guard.detectSneak;
-      const d = dist(guard.x, guard.y, player.x, player.y);
-      if (d < 70) rate *= CONFIG.guard.detectClose;
-      rate *= 0.5 + 0.5 * visibility;
-      guard.alert = clamp(guard.alert + rate * dt, 0, 100);
-      guard.lastSeenX = player.x;
-      guard.lastSeenY = player.y;
+    if (guard.state === GUARD_STATE.CHASE) continue;
+    const d = dist(guard.x, guard.y, flight.tx, flight.ty);
+    if (d >= CONFIG.coin.noiseRadius) continue;
+    guard.state = GUARD_STATE.INVESTIGATE;
+    guard.investigateX = flight.tx;
+    guard.investigateY = flight.ty;
+    guard.suspicionLeft = 6;
+  }
+}
+// Per-second detection fill for a guard that can see the player.
+function detectionRate(world, guard, visibility) {
+  const dark = inShadow(world.parsed, world.player.x, world.player.y);
+  let rate = dark ? CONFIG.guard.detectShadow : CONFIG.guard.detectLit;
+  if (world.player.sneaking) rate *= CONFIG.guard.detectSneak;
+  const d = dist(guard.x, guard.y, world.player.x, world.player.y);
+  if (d < 70) rate *= CONFIG.guard.detectClose;
+  return rate * (0.5 + 0.5 * visibility);
+}
+
+// Walk a guard toward a point at the given speed, turning to face travel.
+function walkGuardTo(world, guard, tx, ty, speed, dt) {
+  const d = dist(guard.x, guard.y, tx, ty);
+  if (d < 4) return true;
+  const step = Math.min(speed * dt, d);
+  const heading = angleTo(guard.x, guard.y, tx, ty);
+  guard.x += ((tx - guard.x) / d) * step;
+  guard.y += ((ty - guard.y) / d) * step;
+  guard.angle = heading;
+  guard.stepPhase += dt * 9;
+  return false;
+}
+
+function stepGuards(world, dt) {
+  for (const guard of world.guards) {
+    const seen = guardSeesPlayer(world.parsed, guard, world.player);
+    if (seen > 0) {
+      guard.lastSeenX = world.player.x;
+      guard.lastSeenY = world.player.y;
+      guard.alert = clamp(guard.alert + detectionRate(world, guard, seen) * dt, 0, 100);
       if (guard.alert >= 100 && guard.state !== GUARD_STATE.CHASE) {
         guard.state = GUARD_STATE.CHASE;
+        guard.suspicionLeft = CONFIG.guard.suspicionTime;
         world.everAlarmed = true;
-        world.message = 'SPOTTED! Break line of sight!';
-        world.messageLeft = 2.2;
+        world.message = 'SPOTTED! Run!';
+        world.messageLeft = 1.6;
       }
     } else if (guard.state === GUARD_STATE.CHASE) {
-      guard.alert = clamp(guard.alert - CONFIG.guard.alarmDecay * dt, 0, 100);
+      guard.alert = Math.max(0, guard.alert - CONFIG.guard.alarmDecay * dt);
       guard.suspicionLeft -= dt;
       if (guard.suspicionLeft <= 0 && guard.alert < 60) {
         guard.state = GUARD_STATE.INVESTIGATE;
@@ -264,27 +244,22 @@ function updateGuards(world, dt) {
         guard.suspicionLeft = 5;
       }
     } else {
-      guard.alert = clamp(guard.alert - CONFIG.guard.decay * dt, 0, 100);
+      guard.alert = Math.max(0, guard.alert - CONFIG.guard.decay * dt);
     }
 
-    if (guard.state === GUARD_STATE.CHASE) {
-      guard.suspicionLeft = CONFIG.guard.suspicionTime;
-      moveGuardToward(world, guard, player.x, player.y, CONFIG.guard.chaseSpeed, dt);
-      if (dist(guard.x, guard.y, player.x, player.y) < CONFIG.guard.catchDistance) {
-        world.caught = true;
-        world.lives -= 1;
-        return;
+    if (guard.state === GUARD_STATE.PATROL) {
+      const target = guard.waypoints[guard.waypointIndex];
+      if (guard.pauseLeft > 0) {
+        guard.pauseLeft -= dt;
+        // Bored sweeping: the cone swings a little while the guard waits.
+        guard.angle += Math.sin(world.time * 1.4 + guard.id * 2.1) * dt * 0.35;
+      } else if (walkGuardTo(world, guard, target.x, target.y, CONFIG.guard.patrolSpeed, dt)) {
+        guard.waypointIndex = (guard.waypointIndex + 1) % guard.waypoints.length;
+        guard.pauseLeft = guard.pauseAtWaypoint;
       }
     } else if (guard.state === GUARD_STATE.INVESTIGATE) {
-      const step = moveGuardToward(
-        world, guard, guard.investigateX, guard.investigateY, CONFIG.guard.investigateSpeed, dt,
-      );
-      if (!step.moved && !step.reached) {
-        // A wall is in the way of the noise: give up and resume the patrol.
-        guard.state = GUARD_STATE.PATROL;
-        guard.alert = Math.min(guard.alert, 45);
-      } else if (step.reached) {
-        // Look around, then give up and go back to the patrol route.
+      if (walkGuardTo(world, guard, guard.investigateX, guard.investigateY, CONFIG.guard.investigateSpeed, dt)) {
+        // Arrived and found nothing: scan the room, then give up.
         guard.scanAngle += guard.scanDir * dt * 1.6;
         guard.angle += guard.scanDir * dt * 1.6;
         if (Math.abs(guard.scanAngle) > 1.9) guard.scanDir *= -1;
@@ -294,75 +269,94 @@ function updateGuards(world, dt) {
           guard.scanAngle = 0;
           guard.alert = Math.min(guard.alert, 45);
         }
-      }
-    } else {
-      // Patrol: walk to the next waypoint, pause and look around there.
-      const target = guard.waypoints[guard.waypointIndex];
-      if (guard.pauseLeft > 0) {
-        guard.pauseLeft -= dt;
-        // A gentle sweep while waiting, not a wild swing: the cone should
-        // stay readable as "this guard watches this way".
-        guard.angle += Math.sin(world.time * 1.4 + guard.id * 2.1) * dt * 0.35;
       } else {
-        const step = moveGuardToward(world, guard, target.x, target.y, CONFIG.guard.patrolSpeed, dt);
-        if (step.reached || !step.moved) {
-          guard.waypointIndex = (guard.waypointIndex + 1) % guard.waypoints.length;
-          guard.pauseLeft = guard.pauseAtWaypoint;
+        guard.suspicionLeft -= dt;
+        if (guard.suspicionLeft <= 0) {
+          guard.state = GUARD_STATE.PATROL;
+          guard.scanAngle = 0;
+          guard.alert = Math.min(guard.alert, 45);
         }
       }
+    } else {
+      // CHASE: run straight at the player (through nothing, but fast).
+      walkGuardTo(world, guard, world.player.x, world.player.y, CONFIG.guard.chaseSpeed, dt);
+      const d = dist(guard.x, guard.y, world.player.x, world.player.y);
+      if (d < CONFIG.guard.catchDistance) {
+        world.caught = true;
+        world.lives -= 1;
+        return; // stop processing the other guards this frame
+      }
     }
   }
 }
 
-function updatePickups(world) {
+function collectPickups(world) {
   const player = world.player;
   for (const chip of world.chips) {
-    if (!chip.taken && dist(player.x, player.y, chip.x, chip.y) < 26) {
-      chip.taken = true;
-      world.chipsGot += 1;
-      world.score += CONFIG.scoring.chip;
-      world.message = `Data chip secured  +${CONFIG.scoring.chip}`;
-      world.messageLeft = 1.6;
-    }
+    if (chip.taken) continue;
+    if (dist(player.x, player.y, chip.x, chip.y) >= 26) continue;
+    chip.taken = true;
+    world.chipsGot += 1;
+    world.score += CONFIG.scoring.chip;
+    world.message = `Data chip +${CONFIG.scoring.chip}`;
+    world.messageLeft = 1.2;
   }
-  if (world.keycard && !world.keycard.taken && dist(player.x, player.y, world.keycard.x, world.keycard.y) < 28) {
-    world.keycard.taken = true;
+  const card = world.keycard;
+  if (card && !card.taken && dist(player.x, player.y, card.x, card.y) < 28) {
+    card.taken = true;
     world.exit.open = true;
     world.score += CONFIG.scoring.keycard;
-    world.message = `Keycard lifted — the vault is open  +${CONFIG.scoring.keycard}`;
-    world.messageLeft = 2.2;
+    world.message = `Keycard +${CONFIG.scoring.keycard} — vault unlocked`;
+    world.messageLeft = 2.0;
   }
 }
 
-function updateExit(world) {
+function checkExit(world) {
   const player = world.player;
+  if (dist(player.x, player.y, world.exit.x, world.exit.y) >= 30) return;
   if (!world.exit.open) {
-    if (dist(player.x, player.y, world.exit.x, world.exit.y) < 30) {
-      world.message = 'Vault locked — find the keycard first.';
-      world.messageLeft = 1.2;
-    }
+    world.message = 'Vault locked — find the keycard first';
+    world.messageLeft = 1.2;
     return;
   }
-  if (dist(player.x, player.y, world.exit.x, world.exit.y) < 30) {
-    world.levelDone = true;
-    const timeBonus = Math.max(0, Math.round((world.parsed.meta.par - world.time) * CONFIG.scoring.timeBonusPerSecond));
-    world.score += CONFIG.scoring.levelClear + timeBonus;
-    if (!world.everAlarmed) world.score += CONFIG.scoring.ghostBonus;
-    world.clearStats = {
-      timeBonus,
-      ghost: !world.everAlarmed,
-      chips: world.chipsGot,
-      totalChips: world.chips.length,
-    };
-  }
+  world.levelDone = true;
+  const par = world.parsed.meta.par;
+  const timeBonus = Math.max(0, Math.round((par - world.time) * CONFIG.scoring.timeBonusPerSecond));
+  world.score += CONFIG.scoring.levelClear + timeBonus;
+  world.clearStats = {
+    time: world.time,
+    par,
+    timeBonus,
+    ghost: !world.everAlarmed,
+    ghostBonus: world.everAlarmed ? 0 : CONFIG.scoring.ghostBonus,
+  };
+  if (!world.everAlarmed) world.score += CONFIG.scoring.ghostBonus;
 }
 
-// Highest guard alert across the floor — the HUD's detection meter.
+// Throw a coin: click a floor point inside the throw range and the coin flies
+// there in 0.45 s, then rings out and draws nearby guards over to look.
+export function throwCoin(world, targetX, targetY) {
+  if (world.coins <= 0 || world.coinFlight) return false;
+  const d = dist(world.player.x, world.player.y, targetX, targetY);
+  if (d > CONFIG.coin.throwRange) return false;
+  world.coins -= 1;
+  world.coinFlight = {
+    fx: world.player.x,
+    fy: world.player.y,
+    tx: targetX,
+    ty: targetY,
+    t: 0,
+  };
+  return true;
+}
+
+// Highest detection meter among the guards — the HUD's alert bar.
 export function maxAlert(world) {
-  return world.guards.reduce((top, guard) => Math.max(top, guard.alert), 0);
+  let max = 0;
+  for (const guard of world.guards) max = Math.max(max, guard.alert);
+  return max;
 }
 
-// Is any guard currently chasing the player?
 export function anyChase(world) {
   return world.guards.some((guard) => guard.state === GUARD_STATE.CHASE);
 }

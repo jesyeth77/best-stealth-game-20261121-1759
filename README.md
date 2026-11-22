@@ -8,6 +8,7 @@ grab the data chips, and reach the green vault exit — unseen.
 - **WASD / arrow keys** — move
 - **SHIFT** — sneak (slower, quieter, harder to spot)
 - **CLICK** — throw a coin; guards in earshot walk over to check the clink
+- **C** — lob a coin at the nearest guard's patrol route
 - **P** — pause · **M** — mute · **R** — restart the floor
 
 ## The rules of the dark
@@ -38,8 +39,8 @@ node serve.ts        # then open http://localhost:8080
 
 No build step, no libraries, no network requests, no assets — every pixel is
 drawn procedurally on canvas and every sound is synthesized with WebAudio.
-Screenshots live under `screenshots/` (title, mid-level, high tension, caught)
-and are real renders of this code, taken with `node shot-driver.mjs`.
+The screenshots under `screenshots/` (title, mid-level, high tension, caught)
+are real renders of this code, taken with `node shot-driver.mjs`.
 
 ## Hand-in
 

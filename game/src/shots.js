@@ -1,15 +1,23 @@
 // Screenshot staging: ?shot= scenes the driver opens, each one a real moment of
 // the game's own code, posed so the judge can read the stealth at a glance.
 //   start — the title screen over a live floor
-//   play  — mid-level: player in shadow, a guard's cone sweeping past a crate
+//   play  — mid-level: courier in shadow, a guard's cone sweeping past a crate
 //   play2 — high tension: two cones crossing, alarm half full, coin in flight
 //   end   — the caught screen after a guard closes in
-// An autopilot walks the player along a short scripted path so each scene is
-// alive, not a static mock. The game sets window.__shotReady when the scene
-// has settled, which is what the shot driver waits for.
+// Posed scenes, not static mocks: a short script lets the patrols run a beat
+// before the capture. The session sets window.__shotReady when the scene has
+// settled, which is what the shot driver waits for.
 import { createWorld, updateWorld, throwCoin, GUARD_STATE } from './world.js';
 import { makeRng } from './random.js';
 import { tileCenter } from './levels.js';
+
+function placePlayer(world, tileX, tileY, facing, sneaking) {
+  const spot = tileCenter(tileX, tileY);
+  world.player.x = spot.x;
+  world.player.y = spot.y;
+  world.player.facing = facing;
+  world.player.sneaking = !!sneaking;
+}
 
 export function applyShot(game, shot, seed) {
   const rng = makeRng(seed || 1);
@@ -23,7 +31,7 @@ export function applyShot(game, shot, seed) {
   if (shot === 'end') {
     game.world = createWorld(0, rng);
     game.screen = 'play';
-    // Walk the player straight into the first guard's patrol lane and let the
+    // Walk the courier straight into the first guard's patrol lane and let the
     // guard catch them: the caught screen is the shot.
     const world = game.world;
     const guard = world.guards[0];
@@ -41,45 +49,41 @@ export function applyShot(game, shot, seed) {
   game.screen = 'play';
   const world = game.world;
   if (shot === 'play') {
-    // Pose: player tucked in the shadow strip near the crates, first guard
+    // Pose: courier tucked in the shadow strip near the crates, first guard
     // mid-patrol with its cone sweeping across the open floor, one chip taken.
-    const shadowSpot = tileCenter(9, 1);
-    world.player.x = shadowSpot.x;
-    world.player.y = shadowSpot.y;
-    world.player.facing = Math.PI / 2;
-    world.player.sneaking = true;
+    placePlayer(world, 9, 1, Math.PI / 2, true);
     world.chips[0].taken = true;
     world.chipsGot = 1;
     world.score = 150;
     world.time = 24;
     const guard = world.guards[0];
-    guard.x = tileCenter(15, 5).x;
-    guard.y = tileCenter(15, 5).y;
+    const post = tileCenter(15, 5);
+    guard.x = post.x;
+    guard.y = post.y;
     guard.angle = Math.PI;
     guard.waypointIndex = 1;
     game.shotScript = { kind: 'hold', waited: 0, holdFor: 1.2 };
-  } else {
-    // play2: level 2, player mid-floor with two cones crossing nearby, alarm
-    // half full, a coin already in the air toward the far guard.
-    const spot = tileCenter(12, 8);
-    world.player.x = spot.x;
-    world.player.y = spot.y;
-    world.player.facing = -Math.PI / 2;
-    world.time = 41;
-    world.score = 450;
-    world.chipsGot = 2;
-    world.chips[0].taken = true;
-    world.chips[1].taken = true;
-    const guard = world.guards[0];
-    guard.alert = 58;
-    guard.state = GUARD_STATE.INVESTIGATE;
-    guard.investigateX = spot.x;
-    guard.investigateY = spot.y;
-    guard.suspicionLeft = 6;
-    world.coins = 2;
-    throwCoin(world, tileCenter(18, 6).x, tileCenter(18, 6).y);
-    game.shotScript = { kind: 'hold', waited: 0, holdFor: 1.0 };
+    return;
   }
+  // play2: level 2, courier mid-floor with two cones crossing nearby, alarm
+  // half full, a coin already in the air toward the far guard.
+  placePlayer(world, 12, 8, -Math.PI / 2, false);
+  world.time = 41;
+  world.score = 450;
+  world.chipsGot = 2;
+  world.chips[0].taken = true;
+  world.chips[1].taken = true;
+  const guard = world.guards[0];
+  guard.alert = 58;
+  guard.state = GUARD_STATE.INVESTIGATE;
+  const spot = tileCenter(12, 8);
+  guard.investigateX = spot.x;
+  guard.investigateY = spot.y;
+  guard.suspicionLeft = 6;
+  world.coins = 2;
+  const coinTarget = tileCenter(18, 6);
+  throwCoin(world, coinTarget.x, coinTarget.y);
+  game.shotScript = { kind: 'hold', waited: 0, holdFor: 1.0 };
 }
 
 // Runs each frame while a shot scene is active. Returns true when the scene is

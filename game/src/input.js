@@ -1,16 +1,10 @@
-// Keyboard + mouse input. Tracks held keys, exposes a plain input snapshot
-// the world consumes each frame, and queues clicks (coin throws) for main.js.
+// Keyboard + mouse input for NIGHTSHIFT.
+// Tracks held keys, hands the world a plain movement snapshot each frame, and
+// queues clicks (coin throws) plus single-press menu keys for main.js.
 export function createInput(canvas) {
-  const keys = new Set();
-  const state = {
-    up: false,
-    down: false,
-    left: false,
-    right: false,
-    sneak: false,
-    click: null, // {x, y} in canvas pixels, consumed by main.js
-    pressed: new Set(), // keys pressed since the last snapshot (for menus)
-  };
+  const held = new Set();
+  const queue = new Set(); // keys pressed since the last snapshot (menus)
+  let click = null; // {x, y} in canvas pixels, consumed by main.js
 
   const KEYMAP = {
     ArrowUp: 'up',
@@ -29,31 +23,28 @@ export function createInput(canvas) {
     if (event.repeat) return; // holding a key must not re-trigger menus
     const action = KEYMAP[event.code];
     if (action) {
-      keys.add(action);
-      state.pressed.add(action);
+      held.add(action);
+      queue.add(action);
       event.preventDefault();
-    } else if (event.code === 'KeyC') {
-      state.pressed.add('coin');
-    } else if (event.code === 'Enter' || event.code === 'Space') {
-      state.pressed.add('confirm');
-      event.preventDefault();
-    } else if (event.code === 'KeyP' || event.code === 'Escape') {
-      state.pressed.add('pause');
-    } else if (event.code === 'KeyR') {
-      state.pressed.add('restart');
-    } else if (event.code === 'KeyM') {
-      state.pressed.add('mute');
+      return;
     }
+    if (event.code === 'KeyC') queue.add('coin');
+    else if (event.code === 'Enter' || event.code === 'Space') {
+      queue.add('confirm');
+      event.preventDefault();
+    } else if (event.code === 'KeyP' || event.code === 'Escape') queue.add('pause');
+    else if (event.code === 'KeyR') queue.add('restart');
+    else if (event.code === 'KeyM') queue.add('mute');
   }
 
   function onKeyUp(event) {
     const action = KEYMAP[event.code];
-    if (action) keys.delete(action);
+    if (action) held.delete(action);
   }
 
   function onMouseDown(event) {
     const rect = canvas.getBoundingClientRect();
-    state.click = {
+    click = {
       x: (event.clientX - rect.left) * (canvas.width / rect.width),
       y: (event.clientY - rect.top) * (canvas.height / rect.height),
     };
@@ -68,25 +59,25 @@ export function createInput(canvas) {
   return {
     snapshot() {
       return {
-        up: keys.has('up'),
-        down: keys.has('down'),
-        left: keys.has('left'),
-        right: keys.has('right'),
-        sneak: keys.has('sneak'),
+        up: held.has('up'),
+        down: held.has('down'),
+        left: held.has('left'),
+        right: held.has('right'),
+        sneak: held.has('sneak'),
       };
     },
     takeClick() {
-      const click = state.click;
-      state.click = null;
-      return click;
+      const taken = click;
+      click = null;
+      return taken;
     },
     takePressed() {
-      const pressed = state.pressed;
-      state.pressed = new Set();
+      const pressed = new Set(queue);
+      queue.clear();
       return pressed;
     },
     hasPressed(name) {
-      return state.pressed.has(name);
+      return queue.has(name);
     },
   };
 }
